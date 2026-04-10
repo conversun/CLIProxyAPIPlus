@@ -181,6 +181,7 @@ var zhStrings = map[string]string{
 	"oauth_submit_ok":    "✓ 回调已提交，等待处理...",
 	"oauth_submit_fail":  "✗ 提交回调失败",
 	"oauth_waiting":      "  等待认证中...",
+	"oauth_user_code":    "  验证码:",
 
 	// ── Usage ──
 	"usage_title":         "📈 使用统计",
@@ -333,6 +334,7 @@ var enStrings = map[string]string{
 	"oauth_submit_ok":    "✓ Callback submitted, waiting...",
 	"oauth_submit_fail":  "✗ Callback submission failed",
 	"oauth_waiting":      "  Waiting for authentication...",
+	"oauth_user_code":    "  User Code:",
 
 	// ── Usage ──
 	"usage_title":         "📈 Usage Statistics",
