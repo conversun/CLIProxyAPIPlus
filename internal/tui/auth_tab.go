@@ -190,7 +190,7 @@ func (m authTabModel) renderContent() string {
 
 	for i, f := range m.files {
 		name := getString(f, "name")
-		channel := getString(f, "channel")
+		providerType := getString(f, "type")
 		email := getString(f, "email")
 		disabled := getBool(f, "disabled")
 
@@ -218,7 +218,7 @@ func (m authTabModel) renderContent() string {
 		}
 
 		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
-			cursor, statusIcon, displayName, channel, displayEmail, statusText)
+			cursor, statusIcon, displayName, providerType, displayEmail, statusText)
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
@@ -271,12 +271,12 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		editable bool
 	}{
 		{"Name", "name", false},
-		{"Channel", "channel", false},
+		{"Type", "type", false},
 		{"Email", "email", false},
 		{"Status", "status", false},
 		{"Status Msg", "status_message", false},
-		{"File Name", "file_name", false},
-		{"Auth Type", "auth_type", false},
+		{"File Name", "name", false},
+		{"Provider", "provider", false},
 		{"Prefix", "prefix", true},
 		{"Proxy URL", "proxy_url", true},
 		{"Priority", "priority", true},

@@ -22,6 +22,7 @@ var oauthProviders = []oauthProvider{
 	{"Gemini CLI", "gemini-cli-auth-url", "🟦"},
 	{"Claude (Anthropic)", "anthropic-auth-url", "🟧"},
 	{"Codex (OpenAI)", "codex-auth-url", "🟩"},
+	{"GitHub Copilot", "github-auth-url", "🐙"},
 	{"Antigravity", "antigravity-auth-url", "🟪"},
 	{"Qwen", "qwen-auth-url", "🟨"},
 	{"Kimi", "kimi-auth-url", "🟫"},
@@ -44,6 +45,7 @@ type oauthTabModel struct {
 	authURL       string // auth URL to display
 	authState     string // OAuth state parameter
 	providerName  string // current provider name
+	userCode      string // device flow user code (e.g. GitHub Copilot)
 	callbackInput textinput.Model
 	inputActive   bool // true when user is typing callback URL
 }
@@ -63,6 +65,7 @@ type oauthStartMsg struct {
 	url          string
 	state        string
 	providerName string
+	userCode     string // device flow user code
 	err          error
 }
 
@@ -107,6 +110,7 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		m.authURL = msg.url
 		m.authState = msg.state
 		m.providerName = msg.providerName
+		m.userCode = msg.userCode
 		m.state = oauthRemote
 		m.callbackInput.SetValue("")
 		m.callbackInput.Focus()
@@ -253,6 +257,7 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 
 		authURL := getString(data, "url")
 		state := getString(data, "state")
+		userCode := getString(data, "user_code")
 		if authURL == "" {
 			return oauthStartMsg{err: fmt.Errorf("no auth URL returned for %s", provider.name)}
 		}
@@ -260,7 +265,7 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 		// Try to open browser (best effort)
 		_ = openBrowser(authURL)
 
-		return oauthStartMsg{url: authURL, state: state, providerName: provider.name}
+		return oauthStartMsg{url: authURL, state: state, providerName: provider.name, userCode: userCode}
 	}
 }
 
@@ -286,6 +291,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi"
 				case "iflow-auth-url":
 					providerKey = "iflow"
+				case "github-auth-url":
+					providerKey = "github-copilot"
 				}
 				break
 			}
@@ -435,22 +442,34 @@ func (m oauthTabModel) renderRemoteMode() string {
 	}
 	sb.WriteString("\n")
 
+	// Device flow user code (e.g. GitHub Copilot)
+	if m.userCode != "" {
+		codeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Background(lipgloss.Color("236")).Padding(0, 2)
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_user_code")))
+		sb.WriteString("\n")
+		sb.WriteString("  " + codeStyle.Render(m.userCode))
+		sb.WriteString("\n\n")
+	}
+
 	sb.WriteString(helpStyle.Render(T("oauth_remote_hint")))
 	sb.WriteString("\n\n")
 
-	// Callback URL input
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
-	sb.WriteString("\n")
-
-	if m.inputActive {
-		sb.WriteString(m.callbackInput.View())
+	// Callback URL input (not needed for device flow, but kept for redirect-based flows)
+	if m.userCode == "" {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
 		sb.WriteString("\n")
-		sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
-	} else {
-		sb.WriteString(helpStyle.Render(T("oauth_press_c")))
+
+		if m.inputActive {
+			sb.WriteString(m.callbackInput.View())
+			sb.WriteString("\n")
+			sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
+		} else {
+			sb.WriteString(helpStyle.Render(T("oauth_press_c")))
+		}
+		sb.WriteString("\n")
 	}
 
-	sb.WriteString("\n\n")
+	sb.WriteString("\n")
 	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
 
 	return sb.String()
