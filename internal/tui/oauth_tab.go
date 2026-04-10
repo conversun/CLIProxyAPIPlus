@@ -164,6 +164,7 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 			case "esc":
 				m.inputActive = false
 				m.callbackInput.Blur()
+				m.callbackInput.SetValue("")
 				m.viewport.SetContent(m.renderContent())
 				return m, nil
 			default:
@@ -188,6 +189,11 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.message = ""
 				m.authURL = ""
 				m.authState = ""
+				m.providerName = ""
+				m.userCode = ""
+				m.inputActive = false
+				m.callbackInput.Blur()
+				m.callbackInput.SetValue("")
 				m.viewport.SetContent(m.renderContent())
 				return m, nil
 			}
@@ -223,6 +229,13 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(oauthProviders) {
 				provider := oauthProviders[m.cursor]
+				m.authURL = ""
+				m.authState = ""
+				m.providerName = ""
+				m.userCode = ""
+				m.inputActive = false
+				m.callbackInput.Blur()
+				m.callbackInput.SetValue("")
 				m.state = oauthPending
 				m.message = warningStyle.Render(fmt.Sprintf(T("oauth_initiating"), provider.name))
 				m.viewport.SetContent(m.renderContent())
