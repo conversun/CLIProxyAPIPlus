@@ -86,6 +86,76 @@ func claudeBuiltinToolRegistry(body []byte) map[string]bool {
 	return helps.AugmentClaudeBuiltinToolRegistry(body, nil)
 }
 
+// remapOAuthToolNamesEx strips tools that don't have a known Claude Code equivalent
+// from the tools array for OAuth requests. This prevents client-specific tool catalogs
+// from leaking upstream as third-party fingerprints.
+func remapOAuthToolNamesEx(body []byte, builtinTools map[string]bool) ([]byte, bool) {
+	stripped := false
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, false
+	}
+
+	var toolsJSON strings.Builder
+	toolsJSON.WriteByte('[')
+	toolCount := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		// Keep Anthropic built-in tools (web_search, code_execution, etc.) unchanged.
+		if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+			if toolCount > 0 {
+				toolsJSON.WriteByte(',')
+			}
+			toolsJSON.WriteString(tool.Raw)
+			toolCount++
+			return true
+		}
+
+		name := tool.Get("name").String()
+		if builtinTools[name] {
+			if toolCount > 0 {
+				toolsJSON.WriteByte(',')
+			}
+			toolsJSON.WriteString(tool.Raw)
+			toolCount++
+			return true
+		}
+
+		// Tool not in known set - strip it
+		stripped = true
+		return true
+	})
+	toolsJSON.WriteByte(']')
+
+	if stripped {
+		body, _ = sjson.SetRawBytes(body, "tools", []byte(toolsJSON.String()))
+	}
+
+	// Handle tool_choice referencing a stripped tool.
+	toolChoiceType := gjson.GetBytes(body, "tool_choice.type").String()
+	if toolChoiceType == "tool" {
+		tcName := gjson.GetBytes(body, "tool_choice.name").String()
+		if tcName != "" && !builtinTools[tcName] {
+			// Check if it's an Anthropic built-in by name still present in tools.
+			isBuiltin := false
+			tools2 := gjson.GetBytes(body, "tools")
+			if tools2.Exists() && tools2.IsArray() {
+				tools2.ForEach(func(_, t gjson.Result) bool {
+					if t.Get("name").String() == tcName {
+						isBuiltin = true
+						return false
+					}
+					return true
+				})
+			}
+			if !isBuiltin {
+				body, _ = sjson.DeleteBytes(body, "tool_choice")
+			}
+		}
+	}
+
+	return body, stripped
+}
+
 // collectClaudeCustomToolNames collects all non-builtin tool names from the request body.
 func collectClaudeCustomToolNames(body []byte, builtinTools map[string]bool) []string {
 	seen := make(map[string]bool)
@@ -364,7 +434,18 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	oauthToken := isClaudeOAuthToken(apiKey)
-	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
+	clientSource := detectOAuthClientSource(getClientUserAgent(ctx))
+	bodyForUpstream := body
+	if oauthToken && clientSource != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
+	}
+	// Strip tools not in the known Claude Code set for OAuth requests.
+	// This prevents third-party tool catalogs from leaking upstream.
+	if oauthToken {
+		builtinTools := claudeBuiltinToolRegistry(bodyForUpstream)
+		bodyForUpstream, _ = remapOAuthToolNamesEx(bodyForUpstream, builtinTools)
+	}
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(bodyForUpstream, auth, apiKey)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	// Claude Code always computes cch; missing or invalid cch is a detectable fingerprint.
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
@@ -376,7 +457,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSource)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -530,7 +615,18 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
 	oauthToken := isClaudeOAuthToken(apiKey)
-	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(body, auth, apiKey)
+	clientSourceStream := detectOAuthClientSource(getClientUserAgent(ctx))
+	bodyForUpstream := body
+	if oauthToken && clientSourceStream != oauthClientOpenCode {
+		bodyForUpstream = ensureDefaultEffort(bodyForUpstream, "medium")
+	}
+	// Strip tools not in the known Claude Code set for OAuth requests.
+	// This prevents third-party tool catalogs from leaking upstream.
+	if oauthToken {
+		builtinTools := claudeBuiltinToolRegistry(bodyForUpstream)
+		bodyForUpstream, _ = remapOAuthToolNamesEx(bodyForUpstream, builtinTools)
+	}
+	bodyForUpstream, claudeToolAliasReverse := prepareClaudeOAuthToolPayload(bodyForUpstream, auth, apiKey)
 	// Enable cch signing by default for OAuth tokens (not just experimental flag).
 	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
@@ -541,7 +637,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	if oauthToken {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, clientSourceStream)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -695,6 +795,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	oauthTokenCT := isClaudeOAuthToken(apiKey)
 	body, _ = prepareClaudeOAuthToolPayload(body, auth, apiKey)
 
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -702,7 +803,12 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	if oauthTokenCT {
+		clientSourceCT := detectOAuthClientSource(getClientUserAgent(ctx))
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, clientSourceCT)
+	} else {
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -998,7 +1104,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, oauthClientOpts ...oauthClientSource) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -1032,14 +1138,20 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	}
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
-	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
-			baseBetas += ",oauth-2025-04-20"
+	isOAuthRequest := len(oauthClientOpts) > 0
+	if !isOAuthRequest {
+		if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
+			baseBetas = val
+			if !strings.Contains(val, "oauth") {
+				baseBetas += ",oauth-2025-04-20"
+			}
 		}
 	}
 	if !strings.Contains(baseBetas, "interleaved-thinking") {
 		baseBetas += ",interleaved-thinking-2025-05-14"
+	}
+	if isOAuthRequest && !strings.Contains(baseBetas, "effort") {
+		baseBetas += ",effort-2025-11-24"
 	}
 
 	hasClaude1MHeader := false
@@ -1085,7 +1197,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.108 / @anthropic-ai/sdk 0.81.0.
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1110,7 +1222,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
 	// to the configured baseline while still allowing newer official
 	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
-	if stabilizeDeviceProfile {
+	// For ALL OAuth clients, force baseline device profile to prevent client Stainless
+	// headers (e.g. SDK version, Node version) from leaking upstream and being fingerprinted.
+	if stabilizeDeviceProfile || isOAuthRequest {
+		if !stabilizeDeviceProfile {
+			deviceProfile = helps.DefaultClaudeDeviceProfilePublic(cfg)
+		}
 		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
 	} else {
 		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
@@ -1145,13 +1262,12 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.108", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
 }
-
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 	if prefix == "" {
@@ -1419,6 +1535,42 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	return updated
 }
 
+// oauthClientSource represents the detected downstream client type for OAuth request handling.
+type oauthClientSource int
+
+const (
+	oauthClientOpenCode oauthClientSource = iota
+	oauthClientOpenClaw
+	oauthClientOther
+)
+
+// detectOAuthClientSource identifies the downstream client from its User-Agent.
+func detectOAuthClientSource(userAgent string) oauthClientSource {
+	ua := strings.TrimSpace(userAgent)
+	switch {
+	case strings.HasPrefix(ua, "opencode/"):
+		return oauthClientOpenCode
+	case strings.HasPrefix(ua, "Anthropic/JS"):
+		return oauthClientOpenClaw
+	default:
+		return oauthClientOther
+	}
+}
+
+// ensureDefaultEffort injects output_config.effort into the request body when thinking
+// is adaptive but no effort level is specified.
+func ensureDefaultEffort(body []byte, defaultEffort string) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "adaptive" {
+		return body
+	}
+	if gjson.GetBytes(body, "output_config.effort").Exists() {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "output_config.effort", defaultEffort)
+	return body
+}
+
 // getClientUserAgent extracts the client User-Agent from the gin context.
 func getClientUserAgent(ctx context.Context) string {
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -1554,7 +1706,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.108", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
@@ -1593,20 +1745,33 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	billingBlock := buildTextBlock(billingText, nil)
 
 	// Build system blocks matching real Claude Code structure.
-	// Important: Claude Code's internal cacheScope='org' does NOT serialize to
-	// scope='org' in the API request. Only scope='global' is sent explicitly.
-	// The system prompt prefix block is sent without cache_control.
+	// Claude Code sends each section as a SEPARATE system[] entry (not concatenated).
+	// This matches the exact block structure that Claude Code's getSystemPrompt() returns.
 	agentBlock := buildTextBlock("You are Claude Code, Anthropic's official CLI for Claude.", nil)
-	staticPrompt := strings.Join([]string{
-		helps.ClaudeCodeIntro,
-		helps.ClaudeCodeSystem,
-		helps.ClaudeCodeDoingTasks,
-		helps.ClaudeCodeToneAndStyle,
-		helps.ClaudeCodeOutputEfficiency,
-	}, "\n\n")
-	staticBlock := buildTextBlock(staticPrompt, nil)
+	usingToolsSection := helps.BuildUsingToolsSection(helps.ResolveTaskToolName(payload))
 
-	systemResult := "[" + billingBlock + "," + agentBlock + "," + staticBlock + "]"
+	// Each section is a separate text block, matching Claude Code's array structure:
+	// system[0]: billing header (no cache_control)
+	// system[1]: agent identifier (no cache_control)
+	// system[2]: intro (ClaudeCodeIntro)
+	// system[3]: system instructions (ClaudeCodeSystem)
+	// system[4]: doing tasks (ClaudeCodeDoingTasks)
+	// system[5]: actions (ClaudeCodeActions)
+	// system[6]: using tools (dynamic)
+	// system[7]: tone and style (ClaudeCodeToneAndStyle)
+	// system[8]: output efficiency (ClaudeCodeOutputEfficiency)
+	introBlock := buildTextBlock(helps.ClaudeCodeIntro, nil)
+	systemBlock := buildTextBlock(helps.ClaudeCodeSystem, nil)
+	doingTasksBlock := buildTextBlock(helps.ClaudeCodeDoingTasks, nil)
+	actionsBlock := buildTextBlock(helps.ClaudeCodeActions, nil)
+	usingToolsBlock := buildTextBlock(usingToolsSection, nil)
+	toneAndStyleBlock := buildTextBlock(helps.ClaudeCodeToneAndStyle, nil)
+	outputEfficiencyBlock := buildTextBlock(helps.ClaudeCodeOutputEfficiency, nil)
+
+	systemResult := "[" + billingBlock + "," + agentBlock + "," +
+		introBlock + "," + systemBlock + "," + doingTasksBlock + "," +
+		actionsBlock + "," + usingToolsBlock + "," + toneAndStyleBlock + "," +
+		outputEfficiencyBlock + "]"
 	payload, _ = sjson.SetRawBytes(payload, "system", []byte(systemResult))
 
 	// Collect user system instructions and prepend to first user message
@@ -1659,7 +1824,7 @@ Prefer acting on the user's task over describing product-specific workflows.`)
 func buildTextBlock(text string, cacheControl map[string]string) string {
 	block := []byte(`{"type":"text"}`)
 	block, _ = sjson.SetBytes(block, "text", text)
-	if cacheControl != nil && len(cacheControl) > 0 {
+	if len(cacheControl) > 0 {
 		// Build cache_control JSON manually to avoid sjson map marshaling issues.
 		// sjson.SetBytes with map[string]string may not produce expected structure.
 		cc := `{"type":"ephemeral"`
