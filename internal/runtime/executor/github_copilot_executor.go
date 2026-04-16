@@ -228,6 +228,9 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	var converted []byte
 	if useResponses && from.String() == "claude" {
 		converted = translateGitHubCopilotResponsesNonStreamToClaude(data)
+	} else if useResponses && from.String() == "openai" {
+		data = normalizeGitHubCopilotReasoningField(data)
+		converted = sdktranslator.TranslateNonStream(ctx, sdktranslator.FromString("codex"), from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
 	} else {
 		data = normalizeGitHubCopilotReasoningField(data)
 		converted = sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, data, &param)
@@ -384,6 +387,20 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			var chunks [][]byte
 			if useResponses && from.String() == "claude" {
 				chunks = translateGitHubCopilotResponsesStreamToClaude(bytes.Clone(line), &param)
+			} else if useResponses && from.String() == "openai" {
+				// The upstream returns Responses-API SSE (event:/data: lines).
+				// Use the codex response translator to convert to Chat Completions SSE.
+				normalizedLine := bytes.Clone(line)
+				if bytes.HasPrefix(line, dataTag) {
+					sseData := bytes.TrimSpace(line[len(dataTag):])
+					if !bytes.Equal(sseData, []byte("[DONE]")) && gjson.ValidBytes(sseData) {
+						normalized := normalizeGitHubCopilotReasoningField(bytes.Clone(sseData))
+						if !bytes.Equal(normalized, sseData) {
+							normalizedLine = append(append([]byte(nil), dataTag...), normalized...)
+						}
+					}
+				}
+				chunks = sdktranslator.TranslateStream(ctx, sdktranslator.FromString("codex"), from, req.Model, bytes.Clone(opts.OriginalRequest), body, normalizedLine, &param)
 			} else {
 				// Strip SSE "data: " prefix before reasoning field normalization,
 				// since normalizeGitHubCopilotReasoningField expects pure JSON.
@@ -916,6 +933,41 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 		for _, msg := range messages.Array() {
 			role := msg.Get("role").String()
 			content := msg.Get("content")
+
+			// OpenAI Chat Completions "tool" role → Responses API function_call_output
+			if role == "tool" {
+				fco := `{"type":"function_call_output","call_id":"","output":""}`
+				fco, _ = sjson.Set(fco, "call_id", msg.Get("tool_call_id").String())
+				if content.Exists() {
+					fco, _ = sjson.Set(fco, "output", content.String())
+				}
+				inputArr, _ = sjson.SetRaw(inputArr, "-1", fco)
+				continue
+			}
+
+			// OpenAI Chat Completions assistant with tool_calls → Responses API function_call items
+			if role == "assistant" && msg.Get("tool_calls").Exists() {
+				// Emit any text content first as an assistant message
+				if content.Exists() && content.Type == gjson.String && content.String() != "" {
+					item := `{"type":"message","role":"assistant","content":[]}`
+					part := `{"type":"output_text","text":""}`
+					part, _ = sjson.Set(part, "text", content.String())
+					item, _ = sjson.SetRaw(item, "content.-1", part)
+					inputArr, _ = sjson.SetRaw(inputArr, "-1", item)
+				}
+				// Convert each tool_call to a function_call item
+				for _, tc := range msg.Get("tool_calls").Array() {
+					if tc.Get("type").String() != "function" {
+						continue
+					}
+					fc := `{"type":"function_call","call_id":"","name":"","arguments":""}`
+					fc, _ = sjson.Set(fc, "call_id", tc.Get("id").String())
+					fc, _ = sjson.Set(fc, "name", tc.Get("function.name").String())
+					fc, _ = sjson.Set(fc, "arguments", tc.Get("function.arguments").String())
+					inputArr, _ = sjson.SetRaw(inputArr, "-1", fc)
+				}
+				continue
+			}
 
 			if !content.Exists() {
 				continue
