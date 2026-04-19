@@ -54,11 +54,12 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	}
 
 	// allowClampUnsupported determines whether to clamp unsupported levels instead of returning an error.
-	// This applies when crossing provider families (e.g., openai→gemini, claude→gemini) and the target
-	// model supports discrete levels. Same-family conversions require strict validation.
+	// This applies when the target model has a discrete levels list. The model registry already declares
+	// exactly which levels are supported, so clamping to the nearest valid level is always safe
+	// regardless of provider family (e.g., proxied Copilot claude-opus-4.6 only supports up to "high").
 	toCapability := detectModelCapability(modelInfo)
 	toHasLevelSupport := toCapability == CapabilityLevelOnly || toCapability == CapabilityHybrid
-	allowClampUnsupported := toHasLevelSupport && !isSameProviderFamily(fromFormat, toFormat)
+	allowClampUnsupported := toHasLevelSupport
 
 	// strictBudget determines whether to enforce strict budget range validation.
 	// This applies when: (1) config comes from request body (not suffix), (2) source format is known,
