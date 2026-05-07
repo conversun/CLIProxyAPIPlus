@@ -109,7 +109,7 @@ jobs:
         if: steps.merge.outputs.clean == 'true' && steps.build.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run ghcr-remote-fix.yml --ref "${TARGET_BRANCH}"
+        run: gh workflow run ghcr-remote-fix.yml --repo "${{ github.repository }}" --ref "${TARGET_BRANCH}"
 
       - name: Prepare PR branch (build failure case)
         if: steps.merge.outputs.clean == 'true' && steps.build.outputs.ok != 'true'
