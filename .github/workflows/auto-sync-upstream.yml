@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: write
 
 concurrency:
@@ -150,7 +151,7 @@ jobs:
           } > /tmp/pr-body.md
 
           # Idempotently ensure the label exists.
-          gh label create auto-sync --color FBCA04 --description "Automated upstream sync" 2>/dev/null || true
+          gh label create auto-sync --color FBCA04 --description "Automated upstream sync" || true
 
           EXISTING=$(gh pr list --head "${PR_BRANCH}" --base "${TARGET_BRANCH}" --state open --json number --jq '.[0].number' || true)
 
