@@ -1,9 +1,12 @@
 name: auto-sync-upstream
 
 on:
-  schedule:
-    # daily at 02:00 UTC (10:00 Asia/Singapore)
-    - cron: '0 2 * * *'
+  # NOTE: schedule disabled — remote-fix needs a planned v6→v7 migration before auto-sync
+  # can succeed (upstream/main is on /v7, remote-fix is still on /v6 with extra auth
+  # providers: codebuddy/copilot/cursor/gitlab/iflow/kilo/kiro). Re-enable by uncommenting
+  # the cron line below once the migration lands.
+  # schedule:
+  #   - cron: '0 2 * * *'  # daily at 02:00 UTC (10:00 Asia/Singapore)
   workflow_dispatch:
 
 permissions:
